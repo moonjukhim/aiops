@@ -10,7 +10,7 @@
 |  | 6 | AIOps와 AI Agent |
 |  | 7 | Human-in-the-Loop 설계 |
 |  | 8 | AIOps 성숙도 모델 |
-| DataOps (AIOps의 연료) | 9 | 운영 데이터의 종류 |
+| DataOps <br> (AIOps의 연료) | 9 | 운영 데이터의 종류 |
 |  | 10 | 운영 데이터의 특성 |
 |  | 11 | 데이터 수집 아키텍처 |
 |  | 12 | 이벤트 정규화와 스키마 |
