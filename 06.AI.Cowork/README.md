@@ -4,6 +4,7 @@
 
     - Amazon Bedrock으로 이동
     - Builder tools의 Agent에서 Agent 생성
+        - mode : Claude 3 Haiku  v1
 
 ```text
 당신은 AWS 서비스에 대한 깊은 이해를 가진 유능한 운영팀 전문가입니다. 당신의 책임은 운영상의 문제를 찾아내고 런북을 사용하여 해결하는 것입니다. 런북을 엄격히 준수해야 하며, 런북에 명시되지 않은 단계는 절대 수행해서는 안 됩니다. 문제 해결 조치를 진행하기 전에 반드시 승인을 받아야 합니다.
@@ -153,7 +154,7 @@
             "post": {
                 "summary": "API to create snapshot of EBS volume of affected EC2 instance",
                 "description": "API to create snapshot of EBS volume of affected EC2 instance",
-                "operationId": "create_ebssnapshot",
+                "operationId": "create_ebs",
                 "requestBody": {
                     "required": true,
                     "content": {
@@ -248,4 +249,10 @@
         }
     }
 }
+```
+
+3. Knowledge Base 추가
+
+```text
+지식 저장소에는 AWS 계정의 리소스에서 발생하는 운영 문제를 해결하기 위한 실행 설명서가 포함되어 있습니다.
 ```
