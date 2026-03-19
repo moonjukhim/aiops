@@ -1,0 +1,419 @@
+---
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This template creates the AWS Lambda functions.
+  These APIs will be dynamically invoked by the agents in Amazon Bedrock agents.
+  **WARNING** You will be billed for the AWS resources used if you create a
+  stack from this template.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network
+        Parameters:
+          - SecurityGroupIngressCidrIp
+      - Label:
+          default: General
+        Parameters:
+          - Prefix
+    ParameterLabels:
+      SecurityGroupIngressCidrIp:
+        default: Security group ingress CIDR IP
+
+Parameters:
+  Prefix:
+    Type: String
+    Description: Unique name prefix for resources that are created by the stack.
+    ConstraintDescription: >-
+      must not start with a dash, and must only contain lowercase a-z, digits,
+      and a dash.
+    AllowedPattern: ^[a-z0-9][a-z0-9-]+$
+    MinLength: 1
+    MaxLength: 30
+    Default: aiops
+
+  SecurityGroupIngressCidrIp:
+    Type: String
+    Description: >-
+      IPv4 address in CIDR format for allowed incoming traffic to the EC2 instance. Defaults to allowing all IPs.
+    ConstraintDescription: >-
+      must be in the form x.x.x.x/s, where x is 0-255, and s is 0-32.
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+    Default: 0.0.0.0/0
+
+Resources:
+
+  # Start: Checks if there are any Amazon CloudWatch alarms in the account related resources
+  CheckCloudWatchAlarmsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CheckCloudWatchAlarmsFunction
+      Description: This function checks if there are any Amazon CloudWatch alarms in the account
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      Timeout: 29
+      Architectures:
+        - arm64
+      Role: !GetAtt CheckCloudWatchAlarmsFunctionRole.Arn
+      Code:
+        ZipFile: |
+          
+          import json
+          import boto3 
+          import os
+          def lambda_handler(event, context):
+              response_body={}
+              
+              if (event['apiPath']=='/get_all_alarms'):
+                  cw_client = boto3.client('cloudwatch')
+                  response = cw_client.describe_alarms(AlarmNames=['EC2_Instance_CPU_Utilization'],StateValue='ALARM')
+                  if (len(response["MetricAlarms"])==0):
+                      response_body = {
+                              'application/json': {
+                                  'body': 'There no no operational issue in AWS account, all alarms are in OK state'
+                              }
+                          }
+                  else:        
+                      response_body = {
+                              'application/json': {
+                                  'body': json.dumps( [{'ID':response["MetricAlarms"][0]["Dimensions"][0]["Value"], 'ResourceType':'EC2', 'State': 'High CPU Utilization, instance in alert state'}] )
+                              }
+                          }
+              else:
+                  response_body = {
+                          'application/json': {
+                              'body': "email notification sent"
+                          }
+                      }
+                          
+              action_response = {
+                  'actionGroup': event['actionGroup'],
+                  'apiPath': event['apiPath'],
+                  'httpMethod': event['httpMethod'],
+                  'httpStatusCode': 200,
+                  'responseBody': response_body
+              }
+              
+              prompt_session_attributes = event['promptSessionAttributes']
+              
+              api_response = {
+                  'messageVersion': '1.0', 
+                  'response': action_response,
+                  'promptSessionAttributes': prompt_session_attributes
+              }
+                  
+              return api_response
+
+  CheckCloudWatchAlarmsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: EC2Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeSecurityGroupRules'
+                  - 'cloudwatch:DescribeAlarms'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref 'AWS::Region'
+
+  CheckCloudWatchAlarmsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CheckCloudWatchAlarmsFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
+  # End: Checks if there are any Amazon CloudWatch alarms in the account related resources
+
+  # Start: Remediate operational issues related to Amazon EC2 instance related resources
+  RemediateEC2OperationalIssueFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RemediateEC2OperationalIssueFunction
+      Description: This AWS Lambda function remediates operational issues related to Amazon EC2 instance
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      Timeout: 29
+      Architectures:
+        - arm64
+      Role: !GetAtt RemediateEC2OperationalIssueFunctionRole.Arn
+      Code:
+        ZipFile: |
+
+          import boto3
+          import json
+          ec2 = boto3.client('ec2')
+
+          def lambda_handler(event, context):
+              response_body={}
+              print(event)
+              if (event['apiPath']=='/create_snapshot_of_EC2_volume'):
+                  print('inner')
+                  instanceid=event['requestBody']['content']['application/json']['properties'][0]['value'].split('/')[1]
+                                    
+                  volume_id=ec2.describe_instances(InstanceIds=[instanceid])['Reservations'][0]['Instances'][0]['BlockDeviceMappings'][0]['Ebs']['VolumeId']
+                  response=ec2.create_snapshot(VolumeId=volume_id)
+                  response_body = {
+                      'application/json': {
+                          'body': response['SnapshotId']
+                      }
+                  }
+              else:
+                  instanceid=event['requestBody']['content']['application/json']['properties'][0]['value'].split('/')[1]
+                  response=ec2.reboot_instances(InstanceIds=[instanceid])
+
+                  response_body = {
+                      'application/json': {
+                          'body': 'instance restarted'
+                      }
+                  }
+              print(response_body)    
+              action_response = {
+                  'actionGroup': event['actionGroup'],
+                  'apiPath': event['apiPath'],
+                  'httpMethod': event['httpMethod'],
+                  'httpStatusCode': 200,
+                  'responseBody': response_body
+              }
+
+              prompt_session_attributes = event['promptSessionAttributes']
+              
+              api_response = {
+                  'messageVersion': '1.0', 
+                  'response': action_response,
+                  'promptSessionAttributes': prompt_session_attributes
+              }
+                  
+              return api_response
+
+
+  RemediateEC2OperationalIssueFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: EC2Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeSecurityGroupRules'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'ec2:CreateSnapshot'
+                  - 'ec2:RebootInstances'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref 'AWS::Region'
+
+
+  RemediateEC2OperationalIssuePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RemediateEC2OperationalIssueFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
+  # End: Remediate operational issues related to Amazon EC2 instance related resources
+
+  # AIOps VPC resources
+  AIOpsBedrockVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: AIOpsBedrockVPC
+
+  AIOpsSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.1.0/24
+      VpcId:
+        Ref: AIOpsBedrockVPC
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      Tags:
+        - Key: Name
+          Value: AIOpsSubnet1
+
+  AIOpsSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.3.0/24
+      VpcId:
+        Ref: AIOpsBedrockVPC
+      AvailabilityZone: !Select 
+        - 1
+        - !GetAZs 
+          Ref: 'AWS::Region'
+      Tags:
+        - Key: Name
+          Value: AIOpsSubnet2
+
+  AIOpsInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: AIOpsInternetGateway
+
+  AIOpsBedrockVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: AIOpsInternetGateway
+      VpcId:
+        Ref: AIOpsBedrockVPC
+
+  AIOpsRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: AIOpsBedrockVPC
+      Tags:
+        - Key: Name
+          Value: AIOpsRouteTable
+
+  AIOpsRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - AIOpsBedrockVPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: AIOpsInternetGateway
+      RouteTableId:
+        Ref: AIOpsRouteTable
+
+  AIOpsSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: AIOpsRouteTable
+      SubnetId:
+        Ref: AIOpsSubnet1
+
+  AIOpsSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: AIOpsRouteTable
+      SubnetId:
+        Ref: AIOpsSubnet2
+
+  AIOpsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Allows incoming traffic on port 5080 and denies all outgoing traffic.
+      SecurityGroupEgress:
+        - Description: Allow all outgoing traffic.
+          IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - Description: Allows incoming TCP traffic on port 5080.
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: SecurityGroupIngressCidrIp
+      VpcId:
+        Ref: AIOpsBedrockVPC
+      Tags:
+        - Key: Name
+          Value: AIOpsSecurityGroup
+
+  EC2KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub '\${AWS::StackName}-key'
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref EC2KeyPair      
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AL2023]
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref AIOpsSubnet1
+          GroupSet: 
+            - !Ref AIOpsSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: aiops-bedrock
+
+  CPUUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: EC2_Instance_CPU_Utilization
+      AlarmDescription: Alarm when server CPU exceeds 70%
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 60
+      Statistic: Average
+      Threshold: 70.0
+      ActionsEnabled: false
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2Instance
+      Unit: Percent
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AL2023: ami-085ad6ae776d8f09c
+    us-west-2:
+      AL2023: ami-0005ee01bca55ab66
+
+Outputs:
+
+  CheckCloudWatchAlarmsFunctionArn:
+    Description: "ARN of the FindS3BucketsWithPublicAccess Lambda function"
+    Value: !GetAtt CheckCloudWatchAlarmsFunction.Arn
+
+  RemediateEC2OperationalIssueFunctionArn:
+    Description: "ARN of the RemovePublicAcessFromS3Bucket Lambda function"
+    Value: !GetAtt RemediateEC2OperationalIssueFunction.Arn
+
+  KeyPairName:
+    Description: Name of the created Key Pair
+    Value: !Ref EC2KeyPair
